@@ -9,6 +9,7 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "^3.11"
 dag-cbor = "^0.3.2"
+cbor2 = "^5.4.6"
 
 
 [build-system]
