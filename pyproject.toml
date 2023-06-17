@@ -12,6 +12,9 @@ dag-cbor = "^0.3.2"
 cbor2 = "^5.4.6"
 
 
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.3.2"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
