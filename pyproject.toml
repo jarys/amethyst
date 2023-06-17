@@ -5,6 +5,9 @@ description = "personal knowledge graph library"
 authors = ["Tomas Krnak <tomas@krnak.cz>"]
 license = "GNU General Public License v3.0"
 readme = "README.md"
+packages = [
+    { include = "amethyst", from = "src" },
+]
 
 [tool.poetry.dependencies]
 python = "^3.11"

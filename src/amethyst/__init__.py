@@ -2,8 +2,7 @@ import cbor2
 import struct
 import json
 
-
-OBJ_HASH_CONSTANT = 0x2b300000
+OBJ_HASH_CONSTANT = 0x2b30000000000000
 
 class GraphObject:
     def __init__(self, graph: "Graph", type_name: str, name=None):
@@ -27,7 +26,7 @@ class GraphObject:
 
     @name.setter
     def name(self, value: str):
-        ptr = self.graph._append_data(value)
+        ptr = self.graph._alloc(value)
         self.graph._write_field(self, 0, ptr)
         self._name = value
 
@@ -40,8 +39,20 @@ class Deleted(GraphObject):
     def __init__(self, graph):
         super().__init__(graph, "deleted")
 
+    @staticmethod
+    def load(_obj_data, graph):
+        return Deleted(graph)
 
-    def json(self):
+    def append(self, graph):
+        """This seems to be useless"""
+        with open(graph.objects_filepath, "wb") as file:
+            file.seek(self.ptr * 17, 1)
+            file.write(Deleted.TYPECODE)
+            file.write(16*b"\x00")  # padding
+        graph.objects.append(self)
+        graph.obj_dict[self.name] = self
+
+    def as_dict(self):
         return {
             "ptr": self.ptr,
             "type": self.type_name,
@@ -52,15 +63,26 @@ class Node(GraphObject):
     TYPECODE = b"\x01"
     def __init__(self, graph, name=None, data=None):
         super().__init__(graph, "node", name)
-        name_ptr = graph._append_data(name)
-        data_ptr = graph._append_data(data)
+        self._data = data
+
+    @staticmethod
+    def load(obj_data, graph) -> "Node":
+        name_ptr, data_ptr = struct.unpack_from("<II", obj_data[:8])
+        name = graph._deref(name_ptr)
+        data = graph._deref(data_ptr)
+        return Node(graph, name, data)
+
+    def append(self, graph):
+        print("appending a node")
+        name_ptr = graph._alloc(self._name)
+        data_ptr = graph._alloc(self._data)
         with open(graph.objects_filepath, "ab") as file:
+            print("file.tell() = ", file.tell())
             file.write(Node.TYPECODE)
             file.write(struct.pack("<II", name_ptr, data_ptr))
             file.write(8*b"\x00")  # padding
         graph.objects.append(self)
         graph.obj_dict[self.name] = self
-        self._data = data
 
     @property
     def data(self):
@@ -68,7 +90,7 @@ class Node(GraphObject):
 
     @data.setter
     def data(self, value):
-        ptr = self.graph._append_data(value)
+        ptr = self.graph._alloc(value)
         self.graph._write_field(self, 1, ptr)
         self._data = value
 
@@ -92,7 +114,7 @@ class Node(GraphObject):
                 raise AttributeError("duplicate definitions")
             return items[0]
 
-    def json(self):
+    def as_dict(self):
         return {
             "ptr": self.ptr,
             "type": self.type_name,
@@ -105,25 +127,38 @@ class Edge(GraphObject):
     TYPECODE = b"\x02"
     def __init__(self, graph: "Graph", o: GraphObject, p: GraphObject, s: GraphObject, name: str | None = None):
         super().__init__(graph, "edge", name)
-        o._oof.add(self)
-        p._pof.add(self)
-        s._sof.add(self)
-        name_ptr = graph._append_data(name)
-        with open(graph.objects_filepath, "ab") as file:
-            file.write(Edge.TYPECODE)
-            file.write(struct.pack("<IIII", name_ptr, o.ptr, p.ptr, s.ptr))
-        graph.objects.append(self)
-        graph.obj_dict[self.name] = self
         self._o = o
         self._p = p
         self._s = s
+        o._oof.add(self)
+        p._pof.add(self)
+        s._sof.add(self)
+
+    @staticmethod
+    def load(obj_data, graph):
+        name_ptr, o_ptr, p_ptr, s_ptr = struct.unpack_from("<IIII", obj_data)
+        name = graph._deref(name_ptr)
+        assert name is None or isinstance(name, str)
+        # assuming that the graph is DAG
+        o, p, s = list(map(graph.get, [o_ptr, p_ptr, s_ptr]))
+        return Edge(graph, o, p, s, name)
+
+    def append(self, graph):
+        print("appedning an edge")
+        name_ptr = graph._alloc(self._name)
+        with open(graph.objects_filepath, "ab") as file:
+            print("file.tell() = ", file.tell())
+            file.write(Edge.TYPECODE)
+            file.write(struct.pack("<IIII", name_ptr, self._o.ptr, self._p.ptr, self._s.ptr))
+        graph.objects.append(self)
+        graph.obj_dict[self.name] = self
 
     @property
     def o(self):
         return self._o
 
     @o.setter
-    def o(self, value: Node) -> None:
+    def o(self, value: GraphObject) -> None:
         self._o._oof.remove(self)
         value._oof.add(self)
         self.graph._write_field(self, 1, value.ptr)
@@ -134,7 +169,7 @@ class Edge(GraphObject):
         return self._p
 
     @p.setter
-    def p(self, value: Node) -> None:
+    def p(self, value: GraphObject) -> None:
         self._p._pof.remove(self)
         value._pof.add(self)
         self.graph._write_field(self, 2, value.ptr)
@@ -145,7 +180,7 @@ class Edge(GraphObject):
         return self._s
 
     @s.setter
-    def s(self, value: Node) -> None:
+    def s(self, value: GraphObject) -> None:
         self._s._sof.remove(self)
         value._sof.add(self)
         self.graph._write_field(self, 3, value.ptr)
@@ -154,7 +189,7 @@ class Edge(GraphObject):
     def __repr__(self) -> str:
         return f"({ self._o.name } { self._p.name } { self._s.name })[{ self.name }]"
 
-    def json(self):
+    def as_dict(self):
         return {
             "ptr": self.ptr,
             "type": self.type_name,
@@ -164,6 +199,9 @@ class Edge(GraphObject):
             "s_ptr": self._s.ptr,
         }
 
+    def as_triple(self):
+        return (self.o, self.p, self.s)
+
 
 class Graph:
     # node = name_pointer (4 bytes) || data_pointer (4 bytes)
@@ -172,63 +210,60 @@ class Graph:
     OBJECT_LENGTH = 17
 
     @staticmethod
-    def new(objects_filepath: str, data_filepath: str):
-        graph = Graph(objects_filepath, data_filepath)
-        graph.new_node("none", None)
+    def new(storage_path: str):
+        graph = Graph(storage_path)
+        open(graph.objects_filepath, "wb").close()
+        open(graph.data_filepath, "wb").close()
         return graph
 
     @staticmethod
-    def load(objects_filepath: str, data_filepath: str):
-        graph = Graph(objects_filepath, data_filepath)
+    def load(storage_path: str):
+        graph = Graph(storage_path)
         graph._load()
         return graph
 
-    def __init__(self, objects_filepath: str, data_filepath: str):
-        self.objects_filepath = objects_filepath
-        self.data_filepath = data_filepath
+    def __init__(self, storage_path: str):
+        self.objects_filepath = storage_path + "/objects.dat"
+        self.data_filepath = storage_path + "/data.dat"
         self.objects = []
         self.obj_dict = dict()
+        self.data_cache = dict()
 
     def _load(self):
         with open(self.objects_filepath, "rb") as file:
             while True:
-                obj_type = file.read(0)
-                if obj_type == 0:  # EOF
+                obj_type = file.read(1)
+                if obj_type == b"":  # EOF
                     break
-                elif obj_type == Deleted.TYPECODE:
-                    file.read(16) # trash padding zeros
-                    Deleted(self)
+                obj_data = file.read(16)
+                if obj_type == Deleted.TYPECODE:  # deleted
+                    obj = Deleted.load(obj_data, self)
                 elif obj_type == Node.TYPECODE:  # node
-                    name_ptr, data_ptr = struct.unpack_from("<II", file.read(8))
-                    file.read(8)  # trash padding zeros
-                    name = self._deref(name_ptr)
-                    data = self._deref(data_ptr)
-                    Node(self, name, data)
+                    obj = Node.load(obj_data, self)
                 elif obj_type == Edge.TYPECODE:  # edge
-                    name_ptr, o_ptr, p_ptr, s_ptr = struct.unpack_from("<IIII", file.read(16))
-                    name = self._deref(name_ptr)
-                    assert isinstance(name, str)
-                    # assuming that the graph is DAG
-                    o, p, s = list(map(self.get, [o_ptr, p_ptr, s_ptr]))
-                    Edge(self, o, p, s, name)
+                    obj = Edge.load(obj_data, self)
                 else:
                     ValueError("unknown object type: {}".format(obj_type))
+                
+                self.objects.append(obj)
+                self.obj_dict[obj.name] = obj
 
-    def _deref(self, pointer: int):
-        if pointer == 0:  # shortcut
-            return None
+    def _deref(self, ptr: int):
         with open(self.data_filepath, "rb") as file:
-            file.seek(pointer, 1)
+            file.seek(ptr, 1)
             data = cbor2.load(file)
         return data
 
-    def _append_data(self, data) -> int:
-        if data is None:
-            return 0
+    def _alloc(self, data) -> int:
+        if data in self.data_cache:
+            return self.data_cache[data]
+
         with open(self.data_filepath, "ab") as file:
-            pointer = file.tell()
+            ptr = file.tell()
             cbor2.dump(data, file)
-        return pointer
+        self.data_cache[data] = ptr
+        #print("allocated", data, "at", ptr)
+        return ptr
 
     def get(self, key: int | str):
         if isinstance(key, int):
@@ -239,30 +274,33 @@ class Graph:
             raise KeyError
 
     def _write_field(self, obj, offset, ptr) -> None:
-        with open(self.objects_filepath, "wb") as file:
-            file.seek(obj.ptr * self.OBJECT_LENGTH, 1)
-            file.seek(1 + 4 * offset, 0)
+        with open(self.objects_filepath, "rb+") as file:
+            file.seek(obj.ptr * Graph.OBJECT_LENGTH + 1 + 4 * offset, 1)
             file.write(struct.pack("<I", ptr))
 
     def new_node(self, name: str | None = None, data=None) -> "Node":
-        return Node(self, name, data)
+        node = Node(self, name, data)
+        node.append(self)
+        return node
 
     def new_edge(self, o: GraphObject, p: GraphObject, s, name: str | None = None) -> "Edge":
-        return Edge(self, o, p, s, name)
+        edge = Edge(self, o, p, s, name)
+        edge.append(self)
+        return edge
+
+    def new_data(self, data):
+        return self.new_node(None, data)
 
     def refragmentize(self) -> None:
-        pass
+        raise NotImplemented
 
-    def json(self):
-        return json.dumps([obj.json() for obj in self.objects], indent=4)
+    def as_array(self):
+        return [obj.as_dict() for obj in self.objects]
 
-
-if __name__ == "__main__":
-    graph = Graph.new("../cache/graph_objects.db", "../cache/graph_data.db")
-    nodes = [graph.new_node() for _ in range(10)]
-    import random
-    edges = []
-    for _ in range(10):
-        o, p, s = [random.choice(nodes) for _ in range(3)]
-        edges.append(graph.new_edge(o, p, s))
-    print(graph.json())
+    def print_db(self):
+        with open(self.objects_filepath, "rb") as file:
+            while True:
+                t = file.read(1)
+                if t == b"":
+                    break
+                print(t, *struct.unpack("<IIII", file.read(16)))
